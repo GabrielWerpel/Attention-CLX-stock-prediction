@@ -5,4 +5,4 @@
 
 # COMMAND ----------
 
-print('Hello without Magic')
+print('Hello There!')
