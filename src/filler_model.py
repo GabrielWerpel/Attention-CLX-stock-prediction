@@ -11,6 +11,13 @@
 
 # COMMAND ----------
 
+# %pip install numpy==1.23.5
+# %pip install tensorflow==2.12.0
+# %pip install keras==2.12.0
+# %pip install xgboost==1.7.6
+
+# COMMAND ----------
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,24 +31,60 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.metrics import accuracy_score, mean_squared_error
 import xgboost as xgb
 from sklearn.impute import SimpleImputer
-from boruta import BorutaPy
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Load Data
+
+# COMMAND ----------
+
 # Load data
-raw_df = pd.read_csv(r"C:\Users\WERPELGA\Desktop\Databricks\01.IDE_Github_Databricks_Sync\filler_data_head_1_for_prediction_small.csv")
+# File location and type
+file_location = "/FileStore/tables/filler_head_1/filler_data_head_1_for_prediction_small.csv"
+file_type = "csv"
+
+# CSV options
+infer_schema = "true"
+first_row_is_header = "true"
+delimiter = ","
+
+# The applied options are for CSV files. For other file types, these will be ignored.
+raw_df = spark.read.format(file_type) \
+  .option("inferSchema", infer_schema) \
+  .option("header", first_row_is_header) \
+  .option("sep", delimiter) \
+  .load(file_location)
+
+# COMMAND ----------
+
+from pyspark.sql.functions import col
+from pyspark.sql.types import DoubleType, StringType, TimestampType
+
+# Get the column names
+column_names = raw_df.columns
+
+# Iterate over the column names and cast the columns
+for column in column_names:
+    column_ = "`{}`".format(column) if '.' in column else column
+    if column == 'datetime_nz':
+        raw_df = raw_df.withColumn(column, col(column_).cast(TimestampType()))
+    elif column == 'MtFillerHeadData.CwPackageName':
+        raw_df = raw_df.withColumn(column, col(column_).cast(StringType()))
+    else:
+        raw_df = raw_df.withColumn(column, col(column_).cast(DoubleType()))
 
 # COMMAND ----------
 
 #Order data by datetime
-raw_df.sort_values(by=['datetime_nz'], inplace=True, ascending=True)
+raw_df = raw_df.sort(col("datetime_nz").asc())
 
 # COMMAND ----------
 
 #Separate df into target_head_y and features_x
-y = raw_df['target_head_y']
-X = raw_df.drop('target_head_y', axis=1)
+y = raw_df.select('target_head_y')
+X = raw_df.drop('target_head_y')
 
 # COMMAND ----------
 
@@ -51,19 +94,8 @@ X = raw_df.drop('target_head_y', axis=1)
 # COMMAND ----------
 
 #Drop NetWeightHead01 and DateTime columns
-X.drop('MtFillerHeadData.NetWeightHead01', axis=1, inplace=True) # repeated column from target_head_y while extracting from historian
-X.drop('DateTime', axis=1, inplace=True) # repeated column from datetime_nz while extracting from historian
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Remove useless features
-
-# COMMAND ----------
-
-#Drop NetWeightHead01 and DateTime columns
-X.drop('MtFillerHeadData.NetWeightHead01', axis=1, inplace=True) # repeated column from target_head_y while extracting from historian
-X.drop('DateTime', axis=1, inplace=True) # repeated column from datetime_nz while extracting from historian
+X = X.drop('MtFillerHeadData.NetWeightHead01') # repeated column from target_head_y while extracting from historian
+X = X.drop('DateTime') # repeated column from datetime_nz while extracting from historian
 
 # COMMAND ----------
 
@@ -72,27 +104,53 @@ X.drop('DateTime', axis=1, inplace=True) # repeated column from datetime_nz whil
 
 # COMMAND ----------
 
-#Change the datetime column to datetime format
-X['datetime_nz'] = pd.to_datetime(X['datetime_nz'])
+from pyspark.sql import Window
+from pyspark.sql.functions import unix_timestamp
+from pyspark.sql.functions import lag, col
+from pyspark.sql.types import DoubleType
 
-# COMMAND ----------
+# Define window specification
+window = Window.orderBy("datetime_nz")
 
 # Add time difference feature
-X['datetime_nz_diff'] = X['datetime_nz'].diff().dt.total_seconds()
+X = X.withColumn("time_diff", (unix_timestamp("datetime_nz") - lag(unix_timestamp("datetime_nz")).over(window)).cast(DoubleType()))
 
-# Fill the first row from time_diff with value 0
-X['datetime_nz_diff'].iloc[0] = 0
+# COMMAND ----------
+
+from pyspark.sql.functions import when
+
+#Fill first row NULL value ith 0
+X = X.withColumn("time_diff", when(X["time_diff"].isNull(), 0).otherwise(X["time_diff"]))
+
+# COMMAND ----------
+
+# Using PySpark's built-in functions to extract specific parts of a datetime
+# (i.e., year, month, day, hour, minute, day of the week) from the "datetime_nz" column.
+# New columns for these extracted features are being created in the DataFrame X.
+from pyspark.sql.functions import year, month, dayofmonth, hour, minute, dayofweek
+
+X = X.withColumn("year", year("datetime_nz"))
+X = X.withColumn("month", month("datetime_nz"))
+X = X.withColumn("day", dayofmonth("datetime_nz"))
+X = X.withColumn("hour", hour("datetime_nz"))
+X = X.withColumn("minute", minute("datetime_nz"))
+X = X.withColumn("dayofweek", dayofweek("datetime_nz"))
 
 
 # COMMAND ----------
 
-# Create features for the datetime column
-X['datetime_nz_year'] = X['datetime_nz'].dt.year
-X['datetime_nz_month'] = X['datetime_nz'].dt.month
-X['datetime_nz_day'] = X['datetime_nz'].dt.day
-X['datetime_nz_hour'] = X['datetime_nz'].dt.hour
-X['datetime_nz_minute'] = X['datetime_nz'].dt.minute
-X['datetime_nz_dayofweek'] = X['datetime_nz'].dt.dayofweek
+# MAGIC %md
+# MAGIC ## I stopped here converting from pandas (VSCode) to pyspark (Datbricks). -------------------
+
+# COMMAND ----------
+
+X = X.toPandas()
+y = y.toPandas()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## I continue with pandas from where I worked from VSCode. I need to change for pyspark to optimize speed. ---------------------
 
 # COMMAND ----------
 
@@ -278,7 +336,7 @@ y.count()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Dimensionality Increase
+# MAGIC ### Dimensionality Increase (Not creating Them for the moment)
 
 # COMMAND ----------
 
@@ -322,10 +380,6 @@ X_df = X.copy()
 
 # COMMAND ----------
 
-X_df.head()
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Use scaler
 
@@ -350,6 +404,7 @@ y = scaler_y.transform(y.values.reshape(-1, 1))
 
 # COMMAND ----------
 
+from boruta import BorutaPy
 # Initialize a random forest estimator. Ensure that it's set to handle the nature of your prediction task (classification or regression)
 forest = RandomForestRegressor(n_jobs=-1, max_depth=5)
 
@@ -408,39 +463,6 @@ sns.boxplot(data=importances_df, y='Feature', x='Importance', orient='h', color=
 plt.title('Feature Importances according to Boruta')
 plt.show()
 
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### PCA
-
-# COMMAND ----------
-
-#Use PCA from sklearn.decomposition to reduce the dimensionality of the dataframe to 10 principal components
-# from sklearn.decomposition import PCA
-
-# pca = PCA(n_components=2)
-# X_pca = pd.DataFrame(pca.fit_transform(scaled_data)
-# X = df.iloc[:,2:]
-# y = df.iloc[:,1]
-
-# COMMAND ----------
-
-# print(scaled_data.shape)
-# print(X_pca.shape)
-
-# COMMAND ----------
-
-# plt.figure(figsize=(8,6))
-# plt.scatter(X_pca.iloc[:,0],X_pca.iloc[:,1],c=y,cmap='plasma')
-# plt.xlabel('First principal component')
-# plt.ylabel('Second Principal Component')
-
-# COMMAND ----------
-
-# df_comp = pd.DataFrame(pca.components_,columns=X.columns)
-# plt.figure(figsize=(12,6))
-# sns.heatmap(df_comp,cmap='plasma',)
 
 # COMMAND ----------
 
